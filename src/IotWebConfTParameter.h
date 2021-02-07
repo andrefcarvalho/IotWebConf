@@ -31,37 +31,7 @@ namespace iotwebconf
 
 class ConfigItemBridge : public ConfigItem
 {
-protected:
-  ConfigItemBridge(const char* id) : ConfigItem(id) { }
-  virtual String toString();
-  virtual int getInputLength() { return 0; };
-  virtual const char* getLabel();
-};
-
-template <typename ValueType, typename _DefaultValueType = ValueType>
-class TParameter : virtual public ConfigItemBridge
-{
 public:
-  using DefaultValueType = _DefaultValueType;
-
-  TParameter(const char* id, const char* label, DefaultValueType defaultValue) :
-    ConfigItemBridge(id),
-    _label(label),
-    _defaultValue(defaultValue)
-  {
-  }
-
-  ValueType& value() { return this->_value; }
-  ValueType& operator*() { return this->_value; }
-
-protected:
-//  void storeValue(std::function<void(SerializationData* serializationData)> doStore) override;
-//  void loadValue(std::function<void(SerializationData* serializationData)> doLoad) override;
-
-  int getStorageSize() override
-  {
-    return sizeof(ValueType);
-  }
   virtual void update(WebRequestWrapper* webRequestWrapper) override
   {
       if (webRequestWrapper->hasArg(this->getId()))
@@ -79,12 +49,41 @@ protected:
     out->println("'");
   }
 
+protected:
+  ConfigItemBridge(const char* id) : ConfigItem(id) { }
+  virtual int getInputLength() { return 0; };
+  virtual bool update(String newValue, bool validateOnly = false) = 0;
+  virtual String toString() = 0;
+};
+
+template <typename ValueType, typename _DefaultValueType = ValueType>
+class TParameter : virtual public ConfigItemBridge
+{
+public:
+  using DefaultValueType = _DefaultValueType;
+
+  TParameter(const char* id, DefaultValueType defaultValue) :
+    ConfigItemBridge(id),
+    _defaultValue(defaultValue)
+  {
+  }
+
+  ValueType& value() { return this->_value; }
+  ValueType& operator*() { return this->_value; }
+
+protected:
+//  void storeValue(std::function<void(SerializationData* serializationData)> doStore) override;
+//  void loadValue(std::function<void(SerializationData* serializationData)> doLoad) override;
+
+  int getStorageSize() override
+  {
+    return sizeof(ValueType);
+  }
+
   virtual bool update(String newValue, bool validateOnly = false) = 0;
   bool validate(String newValue) { return update(newValue, true); }
   virtual String toString() override { return String(this->_value); }
-  virtual const char* getLabel() override { return this->_label; }
 
-  const char* _label;
   ValueType _value;
   const DefaultValueType _defaultValue;
 };
@@ -94,7 +93,10 @@ protected:
 class InputParameter : virtual public ConfigItemBridge
 {
 public:
-  InputParameter(const char* id) : ConfigItemBridge::ConfigItemBridge(id) { }
+  InputParameter(const char* id, const char* label) :
+    ConfigItemBridge::ConfigItemBridge(id),
+    label(label) { }
+
   virtual void renderHtml(
     bool dataArrived, WebRequestWrapper* webRequestWrapper) override
   {
@@ -104,6 +106,8 @@ public:
       webRequestWrapper->arg(this->getId()));
     webRequestWrapper->sendContent(content);
   }
+
+  const char* label;
 
   /**
    * This variable is meant to store a value that is displayed in an empty
@@ -130,7 +134,7 @@ protected:
   {
     String pitem = String(this->getHtmlTemplate());
 
-    pitem.replace("{b}", this->getLabel());
+    pitem.replace("{b}", this->label);
     pitem.replace("{t}", this->getInputType());
     pitem.replace("{i}", this->getId());
     pitem.replace(
@@ -169,7 +173,7 @@ protected:
    * for a parameter.
    */
   virtual String getHtmlTemplate() { return FPSTR(IOTWEBCONF_HTML_FORM_PARAM); };
-  virtual const char* getInputType();
+  virtual const char* getInputType() = 0;
 };
 
 ///////////////////////////////////////////////////////////////////////////
@@ -197,9 +201,9 @@ class CharArrayTParameter : public TParameter<char[len], const char*>
 {
 public:
 using TParameter<char[len], const char*>::TParameter;
-  CharArrayTParameter(const char* id, const char* label, const char* defaultValue) :
-    TParameter<char[len], const char*>::TParameter(id, label, defaultValue),
-    ConfigItemBridge::ConfigItemBridge(id) { };
+  CharArrayTParameter(const char* id, const char* defaultValue) :
+    ConfigItemBridge::ConfigItemBridge(id),
+    TParameter<char[len], const char*>::TParameter(id, defaultValue) { };
 
 protected:
   virtual void applyDefaultValue() override
@@ -383,8 +387,9 @@ class TextTParameter : public CharArrayTParameter<len>, public InputParameter
 public:
 using CharArrayTParameter<len>::CharArrayTParameter;
   TextTParameter(const char* id, const char* label, const char* defaultValue) :
-    CharArrayTParameter<len>::CharArrayTParameter(id, label, defaultValue),
-    InputParameter::InputParameter(id), ConfigItemBridge(id) { }
+    ConfigItemBridge(id),
+    CharArrayTParameter<len>::CharArrayTParameter(id, defaultValue),
+    InputParameter::InputParameter(id, label) { }
 
 protected:
   virtual const char* getInputType() override { return "text"; }
