@@ -113,15 +113,15 @@ public:
    * This variable is meant to store a value that is displayed in an empty
    *   (not filled) field.
    */
-  const char* placeholder;
+  const char* placeholder = NULL;
 
   /**
    * Usually this variable is used when rendering the form input field
    *   so one can customize the rendered outcome of this particular item.
    */
-  const char* customHtml;
+  const char* customHtml = NULL;
 
-  const char* errorMessage;
+  const char* errorMessage = NULL;
 
 protected:
   void clearErrorMessage() override
@@ -140,7 +140,7 @@ protected:
     pitem.replace(
       "{p}", this->placeholder == NULL ? "" : this->placeholder);
     int length = this->getInputLength();
-    if (length >= 0)
+    if (length > 0)
     {
       char parLength[5];
       snprintf(parLength, 5, "%d", length);
@@ -218,7 +218,12 @@ protected:
     }
     if (!validateOnly)
     {
-      strcpy(this->_value, newValue.c_str());
+#ifdef IOTWEBCONF_DEBUG_TO_SERIAL
+      Serial.print(this->getId());
+      Serial.print(": ");
+      Serial.println(newValue);
+#endif
+      strncpy(this->_value, newValue.c_str(), len);
     }
     return true;
   }
@@ -243,30 +248,98 @@ protected:
 
 ///////////////////////////////////////////////////////////////////////////
 
-template <typename ValueType, int base = 10>
-class SignedIntTParameter : public TParameter<ValueType>
+template <typename ValueType>
+class PrimitiveTParameter : public TParameter<ValueType>
 {
+public:
 using TParameter<ValueType>::TParameter;
+  PrimitiveTParameter(const char* id, ValueType defaultValue) :
+    ConfigItemBridge::ConfigItemBridge(id),
+    TParameter<ValueType>::TParameter(id, defaultValue) { };
+
+  void setMax(ValueType val) { this->_max = val; this->_maxDefined = true; }
+  void setMin(ValueType val) { this->_min = val; this->_minDefined = true; }
 
 protected:
-  intmax_t min = std::numeric_limits<ValueType>::min();
-  intmax_t max = std::numeric_limits<ValueType>::max();
+  virtual void applyDefaultValue() override
+  {
+    this->_value = this->_defaultValue;
+  }
 
   virtual bool update(String newValue, bool validateOnly) override
   {
-    char *end;
     errno = 0;
-    intmax_t val = strtoimax(newValue.c_str(), &end, base);
-    if (errno == ERANGE || end == newValue.end() || *end != '\0'
-      || val < this->min  || val > this->max)
+    ValueType val = getValue(newValue);
+    if ((errno == ERANGE)
+      || (this->_minDefined && (val < this->_min))
+      || (this->_maxDefined && (val > this->_max)))
     {
+#ifdef IOTWEBCONF_DEBUG_TO_SERIAL
+      Serial.print(this->getId());
+      Serial.print(" value not accepted: ");
+      Serial.println(val);
+#endif
       return false;
     }
     if (!validateOnly)
     {
+#ifdef IOTWEBCONF_DEBUG_TO_SERIAL
+      Serial.print(this->getId());
+      Serial.print(": ");
+      Serial.println((ValueType)val);
+#endif
       this->_value = (ValueType) val;
     }
     return true;
+  }
+  void storeValue(std::function<void(
+    SerializationData* serializationData)> doStore) override
+  {
+    SerializationData serializationData;
+    serializationData.length = this->getStorageSize();
+    serializationData.data =
+      reinterpret_cast<byte*>(&this->_value);
+    doStore(&serializationData);
+  }
+  void loadValue(std::function<void(
+    SerializationData* serializationData)> doLoad) override
+  {
+    byte buf[this->getStorageSize()];
+    SerializationData serializationData;
+    serializationData.length = this->getStorageSize();
+    serializationData.data = buf;
+    doLoad(&serializationData);
+    ValueType* valuePointer = reinterpret_cast<ValueType*>(buf);
+    this->_value = *valuePointer;
+  }
+  virtual ValueType getValue(String stringValue) = 0;
+
+  ValueType getMax() { return this->_max; }
+  ValueType getMin() { return this->_min; }
+  ValueType isMaxDefined() { return this->_maxDefined; }
+  ValueType isMinDefined() { return this->_minDefined; }
+
+private:
+  ValueType _min;
+  ValueType _max;
+  bool _minDefined = false;
+  bool _maxDefined = false;
+};
+
+///////////////////////////////////////////////////////////////////////////
+template <typename ValueType, int base = 10>
+class SignedIntTParameter : public PrimitiveTParameter<ValueType>
+{
+public:
+using TParameter<ValueType>::TParameter;
+  SignedIntTParameter(const char* id, ValueType defaultValue) :
+    ConfigItemBridge::ConfigItemBridge(id),
+    PrimitiveTParameter<ValueType>::PrimitiveTParameter(id, defaultValue) { };
+
+protected:
+  virtual ValueType getValue(String stringValue)
+  {
+    return (ValueType)strtoimax(stringValue.c_str(), NULL, base);
   }
 };
 
@@ -324,63 +397,6 @@ protected:
 
 ///////////////////////////////////////////////////////////////////////////
 
-template <typename ParamType> class Builder;
-
-template <typename ParamType>
-class AbstractBuilder
-{
-public:
-  AbstractBuilder(const char* id) : _id(id) { };
-  virtual ParamType build() const
-  {
-    return std::move(
-      ParamType(this->_id, this->_label, this->_defaultValue));
-  }
-
-  Builder<ParamType>& label(const char* label)
-    { this->_label = label; return static_cast<Builder<ParamType>&>(*this); }
-  Builder<ParamType>& defaultValue(typename ParamType::DefaultValueType defaultValue)
-    { this->_defaultValue = defaultValue; return static_cast<Builder<ParamType>&>(*this); }
-
-protected:
-  const char* _label;
-  const char* _id;
-  typename ParamType::DefaultValueType _defaultValue;
-};
-
-///////////////////////////////////////////////////////////////////////////
-
-template <typename ParamType>
-class Builder : public AbstractBuilder<ParamType>
-{
-public:
-  Builder(const char* id) : AbstractBuilder<ParamType>(id) { };
-};
-
-template <typename ValueType, int base>
-class Builder<SignedIntTParameter<ValueType, base>>
-  : public AbstractBuilder<SignedIntTParameter<ValueType, base>>
-{
-public:
-  Builder<SignedIntTParameter<ValueType, base>>(const char* id) :
-    AbstractBuilder<SignedIntTParameter<ValueType, base>>(id) { };
-  virtual SignedIntTParameter<ValueType, base> build() const override
-  {
-    return
-      std::move(SignedIntTParameter<ValueType, base>(
-        this->_label, this->_id, this->_defaultValue));
-  }
-
-  Builder& min(uintmax_t min) { this->_min = min; return *this; }
-  Builder& max(uintmax_t max) { this->_max = max; return *this; }
-
-protected:
-  uintmax_t _min;
-  uintmax_t _max;
-};
-
-///////////////////////////////////////////////////////////////////////////
-
 template <size_t len>
 class TextTParameter : public CharArrayTParameter<len>, public InputParameter
 {
@@ -395,6 +411,131 @@ protected:
   virtual const char* getInputType() override { return "text"; }
 };
 
+template <size_t len>
+class PasswordTParameter : public CharArrayTParameter<len>, public InputParameter
+{
+public:
+using CharArrayTParameter<len>::CharArrayTParameter;
+  PasswordTParameter(const char* id, const char* label, const char* defaultValue) :
+    ConfigItemBridge(id),
+    CharArrayTParameter<len>::CharArrayTParameter(id, defaultValue),
+    InputParameter::InputParameter(id, label)
+  {
+    this->customHtml = _customHtmlPwd;
+  }
+
+  void debugTo(Stream* out)
+  {
+    out->print("'");
+    out->print(this->getId());
+    out->print("' with value: ");
+#ifdef IOTWEBCONF_DEBUG_PWD_TO_SERIAL
+    out->print("'");
+    out->print(this->_value);
+    out->println("'");
+#else
+    out->println(F("<hidden>"));
+#endif
+  }
+
+  virtual bool update(String newValue, bool validateOnly) override
+  {
+    if (newValue.length() + 1 > len)
+    {
+      return false;
+    }
+    if (validateOnly)
+    {
+      return true;
+    }
+
+#ifdef IOTWEBCONF_DEBUG_TO_SERIAL
+    Serial.print(this->getId());
+    Serial.print(": ");
+#endif
+    if (newValue.length() > 0)
+    {
+      // -- Value was set.
+      strncpy(this->_value, newValue.c_str(), len);
+#ifdef IOTWEBCONF_DEBUG_TO_SERIAL
+# ifdef IOTWEBCONF_DEBUG_PWD_TO_SERIAL
+      Serial.println(this->_value);
+# else
+      Serial.println("<updated>");
+# endif
+#endif
+    }
+    else
+    {
+#ifdef IOTWEBCONF_DEBUG_TO_SERIAL
+      Serial.println("<was not changed>");
+#endif
+    }
+    return true;
+  }
+
+protected:
+  virtual const char* getInputType() override { return "password"; }
+  virtual String renderHtml(
+    bool dataArrived, bool hasValueFromPost, String valueFromPost) override
+  {
+    return InputParameter::renderHtml(dataArrived, true, String(""));
+  }
+private:
+  const char* _customHtmlPwd = "ondblclick=\"pw(this.id)\"";
+};
+
+template <typename ValueType, int base = 10>
+class NumericTParameter :
+  public SignedIntTParameter<ValueType, base>,
+  public InputParameter
+{
+public:
+  NumericTParameter(const char* id, const char* label, ValueType defaultValue) :
+    ConfigItemBridge(id),
+    SignedIntTParameter<ValueType, base>::SignedIntTParameter(id, defaultValue),
+    InputParameter::InputParameter(id, label) { }
+
+  virtual String renderHtml(
+    bool dataArrived, bool hasValueFromPost, String valueFromPost) override
+  {
+    const char* customHtmlSave = this->customHtml;
+    String modifiers = String(this->customHtml);
+
+    if (this->isMinDefined())
+    {
+      modifiers += " min='" ;
+      modifiers += this->getMin();
+      modifiers += "'";
+    }
+    if (this->isMaxDefined())
+    {
+      modifiers += " max='";
+      modifiers += this->getMax();
+      modifiers += "'";
+    }
+    if (this->step != 0)
+    {
+      modifiers += " step='";
+      modifiers += this->step;
+      modifiers += "'";
+    }
+
+    this->customHtml = modifiers.c_str();
+    String result = InputParameter::renderHtml(dataArrived, hasValueFromPost, valueFromPost);
+    this->customHtml = customHtmlSave;
+
+    return result;
+  }
+
+  ValueType step = 0;
+
+protected:
+  virtual const char* getInputType() override { return "number"; }
+};
+
 } // end namespace
+
+#include <IotWebConfTParameterBuilder.h>
 
 #endif
